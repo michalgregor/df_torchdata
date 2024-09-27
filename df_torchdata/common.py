@@ -1,4 +1,4 @@
-from typing import Dict, Callable
+from typing import Dict, Callable, Union, Tuple
 from torch.utils.data import MapDataPipe, IterDataPipe, functional_datapipe
 import functools
 
@@ -158,3 +158,24 @@ class func_datapipe(functional_datapipe):
                 break
 
         return cls
+
+#---------------------
+# Decollate
+#---------------------
+
+def convert_dict_to_list(dict_data):
+    keys = dict_data.keys()
+    values = dict_data.values()
+    
+    # Use zip and list comprehension to create a list of dictionaries
+    list_data = [dict(zip(keys, item)) for item in zip(*values)]
+    
+    return list_data
+
+def decollate(batch: Union[Tuple, dict]):
+    if isinstance(batch, dict):
+        return convert_dict_to_list(batch)
+    elif isinstance(batch, tuple):
+        return list(zip(*batch))
+    else:
+        raise ValueError(f"Unsupported batch type: {type(batch)}")

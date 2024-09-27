@@ -1,7 +1,7 @@
 import sys
 assert sys.version_info >= (3, 7), "Python>=3.7 is required: we assume stable order in dicts."
 
-from .common import DataFramePipe, func_datapipe, GroupByPipe
+from .common import DataFramePipe, func_datapipe, GroupByPipe, decollate
 from .store import make_store, default_disk_store, default_store, identity
 from torchdata.datapipes import DataChunk
 from typing import Callable, Union, List, Optional, Any, Sized
@@ -242,9 +242,14 @@ class BatchCollateDataFramePipe(BatchDataFramePipe):
             key_fn=key_fn, key_col=key_col
         )
 
+@func_datapipe('decollate')
+class BatchCollateDataFramePipe(MapDataFramePipe):
+    def __init__(self, datapipe):
+        super().__init__(datapipe, decollate)
+        
 @func_datapipe('cache')
 class CacheDataFramePipe(DataFramePipe):
-    def __init__(self, datapipe, store=default_store, key_col=None, clear_store=False):
+    def __init__(self, datapipe, store=default_store, key_fn=None, clear_store=False):
         """
         A pipe that caches the results of a DataFramePipe so that they do
         not need to be recomputed on a subsequent call.
@@ -255,9 +260,12 @@ class CacheDataFramePipe(DataFramePipe):
                 * None: A dictionary is used and the cache is stored in memory.
                 * str: A file is used and the cache is stored on disk.
                 * Any: A custom storage with a dict-like interface.
-            key_col (str, optional): the column to use as key. Defaults to None.
+            key_fn (callable/str, optional): A callable that maps an entry to
+                a cache key or the name of the column to use as key.
+                Defaults to None.
                 * None: the index of the DataFramePipe is used as key.
                 * str: the specified column is used as key.
+                * callable: a custom key function.
         """
         super().__init__(datapipe.dataframe)
 
@@ -271,17 +279,19 @@ class CacheDataFramePipe(DataFramePipe):
         if clear_store:
             self.store.clear()
 
-        self.key_col = key_col
+        self.key_fn = key_fn
         self.datapipe = datapipe
 
     def __getitem__(self, idx):
         if self.store is None:
             return self.datapipe[idx]
          
-        if self.key_col is None:
+        if self.key_fn is None:
             key = idx
+        elif isinstance(self.key_fn, str):
+            key = self.dataframe[self.key_fn].iloc[idx]
         else:
-            key = self.dataframe[self.key_col].iloc[idx]
+            key = self.key_fn(self.dataframe.iloc[idx])
 
         val = self.store.get(key, non_cached)
 
@@ -294,7 +304,7 @@ class CacheDataFramePipe(DataFramePipe):
 class CachedUnbatchDataFramePipe(DataFramePipe):
     def __init__(self,
         datapipe, store=default_store,
-        key_col=None,
+        key_fn=None,
         clear_store=False,
         remove_on_retrieval=False
     ):
@@ -302,7 +312,7 @@ class CachedUnbatchDataFramePipe(DataFramePipe):
         super().__init__(df)
 
         self.store = make_store(store, clear_store)
-        self.key_col = key_col
+        self.key_fn = key_fn
         self.datapipe = datapipe
         self.remove_on_retrieval = remove_on_retrieval
         self.batch_size = self.datapipe.dataframe["dataframe"].iloc[0].shape[0]
@@ -311,10 +321,12 @@ class CachedUnbatchDataFramePipe(DataFramePipe):
         if self.store is None:
             return self.datapipe[index]
 
-        if self.key_col is None:
+        if self.key_fn is None:
             key = index
+        elif isinstance(self.key_fn, str):
+            key = self.dataframe[self.key_fn].iloc[index]
         else:
-            key = self.dataframe[self.key_col].iloc[index]
+            key = self.key_fn(self.dataframe.iloc[index])
 
         val = self.store.get(key, non_cached)
 
@@ -325,10 +337,12 @@ class CachedUnbatchDataFramePipe(DataFramePipe):
             batch_start = batch_index * self.batch_size
             indices = range(batch_index * self.batch_size, batch_start + len(batch))
             
-            if self.key_col is None:
+            if self.key_fn is None:
                 keys = indices
+            elif isinstance(self.key_fn, str):
+                keys = self.dataframe[self.key_fn].iloc[indices].values
             else:
-                keys = self.dataframe[self.key_col].iloc[indices].values
+                keys = [self.key_fn(self.dataframe.iloc[i]) for i in indices]
 
             for key, val in zip(keys, batch):
                 self.store[key] = val
@@ -336,10 +350,10 @@ class CachedUnbatchDataFramePipe(DataFramePipe):
             val = batch[index_in_batch]
 
             if self.remove_on_retrieval:
-                del self.datapipe[keys[index_in_batch]]
+                del self.store[keys[index_in_batch]]
         else:
             if self.remove_on_retrieval:
-                del self.datapipe[key]
+                del self.store[key]
 
         return val
     
